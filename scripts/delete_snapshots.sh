@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-
-usage="$(basename "$0") -s SECONDS -m MINUTES -h HOURS -d DAYS -p GREP_PATTERN [-t]\n
-
+set -u
+usage=\
+"$(basename "$0") -s SECONDS -m MINUTES -h HOURS -d DAYS -p GREP_PATTERN [-D]\n
 arguments:\n
     -s delete snapshots older than SECONDS\n
     -m delete snapshots older than MINUTES\n
     -h delete snapshots older than HOURS\n
     -d delete snapshots older than DAYS\n
     -p the grep pattern to use\n
-    -t test run, do not destroy the snapshots just print them
+    -D destroy the snapshots not just print them
 "
+days=0
+hours=0
+minutes=0
+seconds=0
+pattern=""
+test_run=true
 
-while getopts ":ts:m:h:d:p:" opt; do
+while getopts ":Ds:m:h:d:p:" opt; do
   case $opt in
     s)
       seconds=$OPTARG
@@ -28,8 +34,8 @@ while getopts ":ts:m:h:d:p:" opt; do
     p)
       pattern=$OPTARG
       ;;
-    t)
-      test_run=true
+    D)
+      test_run=false
       ;;
     \?)
       echo "Invalid option: -$OPTARG" 1>&2
@@ -50,24 +56,8 @@ if [[ -z $pattern ]]; then
   exit 1
 fi
 
-if [[ -z $days ]]; then
-  days=0
-fi
-
-if [[ -z $hours ]]; then
-  hours=0
-fi
-
-if [[ -z $minutes ]]; then
-  minutes=0
-fi
-
-if [[ -z $seconds ]]; then
-  seconds=0
-fi
-
-# Figure out which platform we are running on, more specifically, whic version of date
-# we are using. GNU date behaves different thant date on OSX and FreeBSD
+# Figure out which platform we are running on, more specifically, whic version
+# of date we are using. GNU date behaves different thant date on OSX and FreeBSD
 platform='unknown'
 unamestr=$(uname)
 
@@ -84,7 +74,7 @@ else
   exit 1
 fi
 
-compare_seconds=$(($days * 24 * 60 * 60 + $hours * 60 * 60 + $minutes * 60 + $seconds))
+compare_seconds=$((24*60*60*$days + 60*60*$hours + 60*$minutes + $seconds))
 if [ $compare_seconds -lt 1 ]; then
   echo -e time has to be in the past 1>&2
   echo -e $usage 1>&2
@@ -92,29 +82,29 @@ if [ $compare_seconds -lt 1 ]; then
 fi
 
 if [[ "$platform" == 'linux' ]]; then
-compare_timestamp=`date --date="-$(echo $compare_seconds) seconds" +"%s"`
+  compare_timestamp=`date --date="-$(echo $compare_seconds) seconds" +"%s"`
 else
-compare_timestamp=`date -j -v-$(echo $compare_seconds)S +"%s"`
+  compare_timestamp=`date -j -v-$(echo $compare_seconds)S +"%s"`
 fi
 
-# get a list of snapshots sorted by creation date, so that we get the oldest first
-# This will allow us to skip the loop early
+# get a list of snapshots sorted by creation date, so that we get the oldest
+# first. This will allow us to skip the loop early
 snapshots=`zfs list -H -t snapshot -o name,creation -s creation | grep $pattern`
 
 if [[ -z $snapshots ]]; then
   echo "no snapshots found for pattern $pattern"
-  exit 0
+  exit 2
 fi
-
 
 # for in uses \n as a delimiter
 old_ifs=$IFS
 IFS=$'\n'
+count_snapshot=0
 for line in $snapshots; do
   snapshot=`echo $line | cut -f 1`
   creation_date=`echo $line | cut -f 2`
 
-  if [[ "$platform" == 'linux' ]]; then
+  if [[ "$platform" == 'linux' ]]; then 
     creation_date_timestamp=`date --date="$creation_date" "+%s"`
   else
     creation_date_timestamp=`date -j -f "%a %b %d %H:%M %Y" "$creation_date" "+%s"`
@@ -126,7 +116,8 @@ for line in $snapshots; do
   # compare date '-s creation'
   if [ $creation_date_timestamp -lt $compare_timestamp ]
   then
-    if [[ -z $test_run ]]; then
+    ((count_snapshot++))
+    if [[ $test_run  = false ]]; then
       echo "DELETE: $snapshot from $creation_date"
       zfs destroy $snapshot
     else
@@ -138,4 +129,10 @@ for line in $snapshots; do
     break
   fi
 done
+echo "Processed $count_snapshot snapshot(s)"
 IFS=$old_ifs
+if [[ $count_snapshot -eq 0 ]]; then
+  exit 2
+fi
+exit 0
+set +u
